@@ -13,6 +13,7 @@ const WORKERS = Math.min(4, Math.max(2, (navigator.hardwareConcurrency || 4) >> 
 const MAX_IN_FLIGHT = WORKERS * 2;
 // Distance (m) from the eye within which a tile shows its full-size photo atlas instead of the small one.
 const ROOFS_FULL = 600, WALLS_FULL = 900;
+const SHOW_BYTES = 3e6; // of a new tile's meshes shown per frame (see onResult)
 
 function geometry(arrays, attrs) {
   const g = new THREE.BufferGeometry();
@@ -25,6 +26,7 @@ function geometry(arrays, attrs) {
 
 export class Streamer {
   constructor(scene, materials, props, signs, { base, radius = 1100, hysteresis = 250 } = {}) {
+    this.shown = []; // meshes of new tiles not yet shown (see onResult)
     this.scene = scene;
     this.materials = materials;
     this.props = props;
@@ -67,6 +69,8 @@ export class Streamer {
 
   // focus: the point tiles are streamed around; eye: the camera position, for level of detail.
   update(focus, eye = focus) {
+    // (the meshes waiting to be shown: up to so many bytes of them per frame, one at the least)
+    for (let budget = SHOW_BYTES; this.shown.length && (budget > 0 || budget === SHOW_BYTES);) { const { o, bytes, group } = this.shown.shift(); if (group.parent) o.visible = true; budget -= bytes; }
     const size = this.manifest.tileSize;
     for (const [key, t] of this.tiles) {
       if (t.state !== 'ready' || (!t.trees && !t.signs && !t.atlases.length)) continue;
@@ -222,6 +226,9 @@ export class Streamer {
     // nothing in a tile is placed or moved (its points are the world's own): its matrices are never worked out
     group.matrixAutoUpdate = false;
     group.updateMatrixWorld = () => {};
+    // A tile's meshes are megabytes of vertices, sent to the graphics card when each is first drawn: all in one
+    // frame, that frame stood for a tenth of a second. They are shown a few at a time instead (update()).
+    group.traverse((o) => { const a = o.geometry?.attributes; if (!a || !o.visible || o.isInstancedMesh) return; let bytes = 0; for (const k in a) bytes += a[k].array.byteLength; if (bytes > 2e5) { o.visible = false; this.shown.push({ o, bytes, group }); } });
     this.scene.add(group);
     this.stats.loaded++; this.stats.buildings += info.length; this.stats.triangles += tris;
   }
@@ -239,9 +246,16 @@ export class Streamer {
   }
 
   loadTexture(file, done) {
-    new THREE.TextureLoader().load(`${this.base}/${file}`, (map) => {
+    // (as a bitmap: the picture is decoded off the main thread — an <img> is decoded when it is first drawn, which
+    // held a frame up for a tenth of a second and more)
+    this.bitmaps ??= new THREE.ImageBitmapLoader().setOptions({ imageOrientation: 'flipY', premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
+    this.bitmaps.load(`${this.base}/${file}`, (bitmap) => {
+      const map = new THREE.Texture(bitmap);
+      map.flipY = false; // (the bitmap is the right way up already)
       map.colorSpace = THREE.SRGBColorSpace;
       map.anisotropy = 4;
+      map.needsUpdate = true;
+      map.addEventListener('dispose', () => bitmap.close());
       done(map);
     });
   }

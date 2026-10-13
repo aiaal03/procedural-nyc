@@ -222,6 +222,8 @@ function along(lane, s, pos, dir) {
   dir.multiplyScalar(1 / l);
 }
 
+const LANE_CELL = 200; // metres: lanes are looked up by the cell their middle lies in
+
 export class Traffic {
   // roads: parsed roads.json; surface(x, z): height of the road surface there.
   constructor(roads, surface) {
@@ -264,7 +266,14 @@ export class Traffic {
   // A lane with some part within `radius` of the focus, picked by weight; null if the area has none.
   pick(focus, radius, filter) {
     let best = null, bestKey = -1;
-    for (const l of this.graph.lanes) {
+    // (only the lanes of the cells within reach are looked at: a car is put somewhere new whenever the view moves
+    // on, and going through every lane of the city each time took a fifth of a frame's time while it moved)
+    const cells = this.lanesByCell ??= (() => {
+      const map = new Map();
+      for (const l of this.graph.lanes) { const m = l.pts[l.pts.length >> 1], k = Math.floor(m.x / LANE_CELL) + ',' + Math.floor(m.z / LANE_CELL); if (!map.has(k)) map.set(k, []); map.get(k).push(l); }
+      return map;
+    })();
+    for (let cx = Math.floor((focus.x - radius) / LANE_CELL); cx <= Math.floor((focus.x + radius) / LANE_CELL); cx++) for (let cz = Math.floor((focus.z - radius) / LANE_CELL); cz <= Math.floor((focus.z + radius) / LANE_CELL); cz++) for (const l of cells.get(cx + ',' + cz) ?? []) {
       if (!filter(l)) continue;
       const m = l.pts[l.pts.length >> 1];
       if (Math.hypot(m.x - focus.x, m.z - focus.z) > radius) continue;

@@ -63,7 +63,17 @@ export class Signs {
     this.ads = new Ads();
   }
 
+  // The names of a tile's signs are drawn a few at a time, over as many frames as it takes (drawing them all at
+  // once, and sending the picture to the graphics card as it was, held a frame up for a twentieth of a second and
+  // more): `jobs` are the pictures in the making.
+  jobs = [];
+
   update() {
+    const until = performance.now() + 2.5; // milliseconds of drawing per frame
+    while (this.jobs.length && performance.now() < until) {
+      const job = this.jobs[0];
+      if (job.cancelled || job.step()) this.jobs.shift();
+    }
     const glow = 0.12 + shared.uNight.value * 1.25; // a lit sign is a little brighter than its surroundings by day too
     for (const m of this.live) m.emissiveIntensity = glow;
   }
@@ -119,8 +129,7 @@ export class Signs {
       const H = Math.min(ATLAS_MAX_H, 2 ** Math.ceil(Math.log2(Math.max(64, cy + rowH))));
       const canvas = document.createElement('canvas');
       canvas.width = ATLAS_W; canvas.height = H;
-      const g = canvas.getContext('2d');
-      for (const cell of cells.values()) drawSign(g, cell.s, cell.x, cell.y, cell.w, cell.h);
+      const g = canvas.getContext('2d'), todo = [...cells.values()];
       // the lettered boards lie over the plain panels; a sign that found no room in the atlas keeps its panel
       const tpos = [];
       uv.length = 0;
@@ -135,21 +144,37 @@ export class Signs {
       tgeo.setAttribute('position', new THREE.Float32BufferAttribute(tpos, 3));
       tgeo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
       tgeo.computeVertexNormals();
-      const map = new THREE.CanvasTexture(canvas);
-      map.colorSpace = THREE.SRGBColorSpace; map.anisotropy = 8;
-      const material = new THREE.MeshStandardMaterial({
-        map, emissiveMap: map, emissive: 0xffffff, emissiveIntensity: 0.12, roughness: 0.55,
-        polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4, // drawn over the panel behind it
-      });
-      this.live.add(material);
-      const mesh = new THREE.Mesh(tgeo, material);
-      group.add(mesh);
-      return { mesh, material, map, tgeo };
+      const made = { mesh: null, material: null, map: null, tgeo, job: null };
+      // the picture: a few boards per call (update()), then handed over as a bitmap — which the browser makes
+      // ready for the graphics card off the main thread — and only then shown
+      made.job = {
+        cancelled: false,
+        step: () => {
+          for (let n = 0; n < 6 && todo.length; n++) { const cell = todo.pop(); drawSign(g, cell.s, cell.x, cell.y, cell.w, cell.h); }
+          if (todo.length) return false;
+          createImageBitmap(canvas, { imageOrientation: 'flipY', premultiplyAlpha: 'none', colorSpaceConversion: 'none' }).then((bitmap) => {
+            if (made.job.cancelled) { bitmap.close(); return; }
+            const map = made.map = new THREE.Texture(bitmap);
+            map.flipY = false; map.colorSpace = THREE.SRGBColorSpace; map.anisotropy = 8; map.needsUpdate = true;
+            map.addEventListener('dispose', () => bitmap.close());
+            const material = made.material = new THREE.MeshStandardMaterial({
+              map, emissiveMap: map, emissive: 0xffffff, emissiveIntensity: 0.12, roughness: 0.55,
+              polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4, // drawn over the panel behind it
+            });
+            this.live.add(material);
+            made.mesh = new THREE.Mesh(tgeo, material);
+            group.add(made.mesh);
+          });
+          return true;
+        },
+      };
+      this.jobs.push(made.job);
+      return made;
     };
     const dropNear = () => {
-      group.remove(near.mesh);
-      this.live.delete(near.material);
-      near.map.dispose(); near.material.dispose(); near.tgeo.dispose();
+      near.job.cancelled = true;
+      if (near.mesh) { group.remove(near.mesh); this.live.delete(near.material); near.map.dispose(); near.material.dispose(); }
+      near.tgeo.dispose();
       near = null;
     };
     return {
