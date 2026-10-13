@@ -153,7 +153,7 @@ export class Streamer {
       const box = new THREE.Box3(), v = new THREE.Vector3();
       let sum = 0, n = 0;
       for (let i = 0; i < roads.aLayer.length; i++) if (roads.aLayer[i] > 3.5) { box.expandByPoint(v.fromArray(roads.position, i * 3)); sum += v.y; n++; }
-      if (n) t.water = { y: sum / n, sphere: box.getBoundingSphere(new THREE.Sphere()) };
+      if (n) t.water = { y: sum / n, sphere: box.getBoundingSphere(new THREE.Sphere()), box: box.clone() };
     }
     if (paint.position.length) {
       const m = new THREE.Mesh(geometry(paint, [['position', 3], ['normal', 3], ['color', 3], ['aLayer', 1]]), this.materials.paint);
@@ -226,6 +226,7 @@ export class Streamer {
     // nothing in a tile is placed or moved (its points are the world's own): its matrices are never worked out
     group.matrixAutoUpdate = false;
     group.updateMatrixWorld = () => {};
+    t.sphere = new THREE.Box3().setFromObject(group).getBoundingSphere(new THREE.Sphere()); // (all of the tile: for the water mirror, which leaves out the tiles it cannot show)
     // A tile's meshes are megabytes of vertices, sent to the graphics card when each is first drawn: all in one
     // frame, that frame stood for a tenth of a second. They are shown a few at a time instead (update()).
     group.traverse((o) => { const a = o.geometry?.attributes; if (!a || !o.visible || o.isInstancedMesh) return; let bytes = 0; for (const k in a) bytes += a[k].array.byteLength; if (bytes > 2e5) { o.visible = false; this.shown.push({ o, bytes, group }); } });

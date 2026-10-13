@@ -19,16 +19,22 @@ export class WaterMirror {
     this.size = new THREE.Vector2();
     this.clear = new THREE.Color(0, 0, 0);
     this.frustum = new THREE.Frustum();
+    this.seen = []; // the water in view (level())
+    this.rect = new THREE.Vector4(); // where the water is on the screen: left, bottom, right, top (see level())
+    this.narrow = new THREE.Frustum();
     this.enabled = true;
+    this.crop = true; // only the part of the picture that water looks at is drawn (false: all of it, to compare)
   }
 
   // The level of the water nearest to `focus` among the tiles in view, or null if no water is to be seen.
   level(tiles, camera, focus) {
     this.frustum.setFromProjectionMatrix(_m.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
     let best = null, bestD = Infinity;
+    this.seen.length = 0;
     for (const t of tiles.values()) {
       const w = t.water;
       if (!w || !this.frustum.intersectsSphere(w.sphere)) continue;
+      this.seen.push(w);
       const d = Math.hypot(w.sphere.center.x - focus.x, w.sphere.center.z - focus.z);
       if (d < bestD) { bestD = d; best = w.y; }
     }
@@ -65,7 +71,30 @@ export class WaterMirror {
     // from a point of the world to its place in the mirror picture
     shared.uMirrorMatrix.value.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
 
+    // Where in the mirror picture the water looks: `rect`, from -1 to 1 across it — each stretch of water where the
+    // mirror's own camera sees it (water that does not lie at the mirror's level looks elsewhere than where it is
+    // on the screen); the whole picture if any of it comes too near the eye to tell.
+    this.rect.set(1, 1, -1, -1);
+    for (const w of this.seen) for (let k = 0; k < 4; k++) {
+      _corner.set(k & 1 ? w.box.max.x : w.box.min.x, w.y, k & 2 ? w.box.max.z : w.box.min.z, 1).applyMatrix4(shared.uMirrorMatrix.value);
+      if (_corner.w < 1) { this.rect.set(-1, -1, 1, 1); continue; }
+      const q = this.rect, x = _corner.x / _corner.w, yy = _corner.y / _corner.w;
+      q.x = Math.min(q.x, x); q.y = Math.min(q.y, yy); q.z = Math.max(q.z, x); q.w = Math.max(q.w, yy);
+    }
+    const MARGIN = 0.4, rc = this.rect, x0 = Math.max(-1, rc.x - MARGIN), y0 = Math.max(-1, rc.y - MARGIN), x1 = Math.min(1, rc.z + MARGIN), y1 = Math.min(1, rc.w + MARGIN);
+    // (water that is wholly off the screen — its tile is in view, the water itself is not — needs no picture at all)
+    if (this.crop && (x1 <= x0 || y1 <= y0)) { shared.uMirrorOn.value = 0; return; }
     const hidden = hide.filter((o) => o && o.visible);
+    // The mirror picture is only ever looked at where there is water on the screen (a little beyond: the ripples
+    // shift it). So only that part of it is drawn, and of the city only the tiles that show in that part — when
+    // the water is a moat in a corner of the view, that is a small share of a second drawing of everything.
+    const part = this.crop && (x1 - x0 < 1.95 || y1 - y0 < 1.95);
+    if (part) {
+      // (the same view, cut to that part: what lies outside it is outside this frustum)
+      _crop.set(2 / (x1 - x0), 0, 0, -(x1 + x0) / (x1 - x0), 0, 2 / (y1 - y0), 0, -(y1 + y0) / (y1 - y0), 0, 0, 1, 0, 0, 0, 0, 1);
+      this.narrow.setFromProjectionMatrix(_crop.multiply(shared.uMirrorMatrix.value));
+      for (const t of tiles.values()) if (t.group?.visible && t.sphere && !this.narrow.intersectsSphere(t.sphere)) hidden.push(t.group);
+    }
     for (const o of hidden) o.visible = false;
     const state = { target: r.getRenderTarget(), shadows: r.shadowMap.autoUpdate, background: scene.background, clear: r.getClearColor(new THREE.Color()), alpha: r.getClearAlpha() };
     shared.uMirror.value = this.blank; shared.uMirrorOn.value = 0; // (the picture cannot show itself)
@@ -73,6 +102,9 @@ export class WaterMirror {
     r.setRenderTarget(this.target);
     r.setClearColor(this.clear, 0);
     r.clear();
+    if (part) { const w = this.target.width, h = this.target.height; this.target.scissor.set(Math.floor((x0 * 0.5 + 0.5) * w), Math.floor((y0 * 0.5 + 0.5) * h), Math.ceil((x1 - x0) * 0.5 * w), Math.ceil((y1 - y0) * 0.5 * h)); }
+    this.target.scissorTest = part;
+    r.setRenderTarget(this.target); // (takes the scissor)
     r.render(scene, cam);
     r.setRenderTarget(state.target);
     r.setClearColor(state.clear, state.alpha);
@@ -82,5 +114,6 @@ export class WaterMirror {
   }
 }
 
+const _corner = new THREE.Vector4(), _crop = new THREE.Matrix4();
 const _m = new THREE.Matrix4(), _rot = new THREE.Matrix4(), _up = new THREE.Vector3(0, 1, 0), _pos = new THREE.Vector3(), _look = new THREE.Vector3();
 const _plane = new THREE.Plane(), _clip = new THREE.Plane(), _v4 = new THREE.Vector4(), _q = new THREE.Vector4();
