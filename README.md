@@ -3,6 +3,8 @@
 Manhattan in the browser, in three.js — walk it, jump, and take off and fly over it. Real buildings from public
 data, procedural detail on top, day and night, traffic, and Times Square walled in screens.
 
+**Live: https://aiaal03.github.io/procedural-nyc/** — click the picture to look round, WASD to walk, Space twice to fly.
+
 A fork of [Procedural Tokyo](https://github.com/jeantimex/tokyo) by **jeantimex** (MIT): the engine — tile
 streaming, generated facades, traffic, atmosphere and clouds, water, lamps at night — is theirs; this fork swaps the
 city for New York and adds a first-person mode.

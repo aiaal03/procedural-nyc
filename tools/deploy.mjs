@@ -17,6 +17,25 @@ const remote = read('git remote get-url origin'), head = read('git rev-parse --s
 
 run('npx vite build');
 fs.writeFileSync(path.join(DIST, '.nojekyll'), ''); // (serve the files as they are)
+// Imagery that may not be republished stays out: Esri's photos of the land round the New York areas are fetched for
+// one's own use, so the published backdrop keeps its terrain without them (and its credit line goes too).
+for (const dir of fs.existsSync(path.join(DIST, 'tiles')) ? fs.readdirSync(path.join(DIST, 'tiles')) : []) {
+  const file = path.join(DIST, 'tiles', dir, 'manifest.json');
+  if (!fs.existsSync(file)) continue;
+  const manifest = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (!manifest.attribution?.some((a) => /Esri/.test(a))) continue;
+  manifest.attribution = manifest.attribution.filter((a) => !/Esri/.test(a));
+  fs.writeFileSync(file, JSON.stringify(manifest, null, 1));
+  fs.rmSync(path.join(DIST, 'ortho', dir, 'backdrop'), { recursive: true, force: true });
+}
+// (an area that shares another's photos has them as a link in public/ortho: Pages serves files, not links)
+for (const dir of fs.existsSync(path.join(DIST, 'ortho')) ? fs.readdirSync(path.join(DIST, 'ortho')) : []) {
+  const p = path.join(DIST, 'ortho', dir);
+  if (!fs.lstatSync(p).isSymbolicLink()) continue;
+  const target = fs.realpathSync(p);
+  fs.rmSync(p);
+  fs.cpSync(target, p, { recursive: true, filter: (f) => !f.includes(`${path.sep}backdrop`) });
+}
 
 fs.rmSync(path.join(DIST, '.git'), { recursive: true, force: true });
 run('git init -q -b gh-pages', DIST);
