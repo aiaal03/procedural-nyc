@@ -24,6 +24,19 @@ const FOG_DAY = new THREE.Color(0.72, 0.75, 0.79), HAZE_DAY = new THREE.Color(0.
 const FOG_WARM = new THREE.Color(0.85, 0.6, 0.45), FOG_NIGHT = new THREE.Color(0.035, 0.04, 0.055); // fog under the low sun, and at night
 export const SHADE = 0.42;             // what is left of a surface's light under a thick cloud: the sky still lights it
 
+// A pixel that has come out as NaN or infinity (the atmosphere's sky and cloud lookups, at some places on the
+// globe, can give one) is made black before the bloom and the lens flare: their blurs would spread one bad pixel
+// over the whole picture.
+class Sanitize extends Effect {
+  constructor() {
+    super('Sanitize', `void mainImage(const in vec4 inputColor, const in vec2 uv, out vec4 outputColor) {
+  vec4 c = inputColor;
+  bool bad = any(isnan(c)) || any(isinf(c));
+  outputColor = bad ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(min(c.rgb, vec3(65000.0)), c.a);
+}`);
+  }
+}
+
 // The grade of the finished picture, as a camera and a print would give it: more contrast (an S-curve), a
 // little more colour, warm lights and cool shades, darker corners. Nothing at amount 0.
 class Grade extends Effect {
@@ -237,7 +250,7 @@ export class Atmosphere {
     this.composer.addPass(this.cloudPass);
     this.skyPass = new EffectPass(camera, plain);
     this.composer.addPass(this.skyPass);
-    this.composer.addPass(new EffectPass(camera, new Scale(1 / UNITS)));
+    this.composer.addPass(new EffectPass(camera, new Sanitize(), new Scale(1 / UNITS)));
     this.bloom = new BloomEffect({ intensity: 0.5, luminanceThreshold: 0.9, luminanceSmoothing: 0.2, mipmapBlur: true });
     this.gradeEffect = new Grade();
     // the end of the picture as the atmosphere library's own examples have it: the flare of the lens round what is
@@ -282,6 +295,13 @@ export class Atmosphere {
     Object.assign(material, this.textures);
     material.worldToECEFMatrix.copy(this.worldToECEF);
     material.sunDirection.copy(this.sun);
+    // A ray that grazes the ground sphere can come out NaN (a square root of a hair below zero): at a few places on
+    // the globe one of them falls on a texel of the map, and the map's blur spreads it over every reflection — the
+    // city then renders black (Midtown Manhattan). Such a texel is dropped.
+    material.fragmentShader = material.fragmentShader.replace(/}\s*$/, `  if (any(isnan(outputColor)) || any(isinf(outputColor))) outputColor = vec4(0.0, 0.0, 0.0, 1.0);
+}`);
+    if (!material.fragmentShader.includes('isnan')) console.warn('atmosphere: the sky shader has changed; NaN texels are not filtered');
+    material.needsUpdate = true;
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
     mesh.frustumCulled = false;
     return { mesh, scale: 0.72 / UNITS }; // (a little under the sky's own strength: the picture was balanced for a dimmer one)

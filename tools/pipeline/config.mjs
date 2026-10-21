@@ -6,6 +6,30 @@ import { meshBlock, meshBounds3 } from '../../src/shared/geo.js';
 
 export const AREAS = {
   // (in the order of the city switch; the first is the one the site opens with)
+  // New York areas (`us`): a plain rectangle `size` [east-west, north-south] kilometres around the origin, built from
+  // NYC Open Data (building footprints, planimetric roadbed and sidewalks, 2024 orthophotos), OSM and Terrarium elevation
+  midtown: {
+    name: 'Midtown Manhattan',
+    us: true,
+    tz: 'America/New_York',
+    origin: [-73.9845, 40.7535],  // Bryant Park: Times Square, the Empire State, Chrysler and Grand Central around it
+    size: [3.6, 3.0],
+    backdrop: 20,                 // New Jersey, Brooklyn, Queens and the rivers around, under aerial photos
+    view: '-150,250,1100,200,24',
+    walk: '-109,-452,2.76',         // where the person starts: the middle of Times Square, facing One Times Square
+    adSquare: [[-168, -290], [-37, -650]], // Times Square, along its length: its walls carry the screens
+  },
+  downtown: {
+    name: 'Lower Manhattan',
+    us: true,
+    tz: 'America/New_York',
+    origin: [-74.0080, 40.7105],  // City Hall Park: One World Trade, the Financial District and the Brooklyn Bridge
+    size: [3.6, 3.0],
+    backdrop: 20,
+    view: '-150,250,1300,40,26',
+    walk: '-40,-40,0.6',          // City Hall Park
+    adSquare: [[2400, -2400], [2400, -2401]], // (no Times Square here: billboards only, now and then)
+  },
   tokyo: {
     name: 'Tokyo',
     origin: [139.76712, 35.68124], // Tokyo Station, between Marunouchi and Yaesu
@@ -44,6 +68,17 @@ export const AREAS = {
     backdrop: 30,                  // the summit stands 18 km to the north-east
     view: '0,0,700,305,10',        // the opening view (as ?cam=): over the town towards the mountain
   },
+  // What if the Twin Towers still stood: Lower Manhattan with the World Trade Center of 1973 (tools/pipeline/whatif.mjs)
+  twintowers: {
+    name: 'Lower Manhattan · Twin Towers',
+    us: true, raw: 'downtown', twinTowers: true,
+    adSquare: [[2400, -2400], [2400, -2401]],
+    tz: 'America/New_York',
+    origin: [-74.0080, 40.7105],
+    size: [3.6, 3.0],
+    backdrop: 20,
+    view: '-430,-120,1500,30,22',
+  },
 };
 
 export const ROOT = path.resolve(import.meta.dirname, '../..');
@@ -61,9 +96,15 @@ export function backdropBox({ origin: [lon, lat] }, backdrop) {
 
 export function resolveArea(argv = process.argv) {
   const arg = argv.find((a) => a.startsWith('--area='));
-  const id = arg ? arg.split('=')[1] : 'shibuya';
+  const id = arg ? arg.split('=')[1] : 'midtown';
   const area = AREAS[id];
   if (!area) throw new Error(`unknown area "${id}" (known: ${Object.keys(AREAS).join(', ')})`);
+  if (area.us) {
+    const [w, h] = area.size, [lon, lat] = area.origin;
+    const dLat = h / 2 / 110.95, dLon = w / 2 / (111.32 * Math.cos((lat * Math.PI) / 180));
+    const bbox = { south: lat - dLat, north: lat + dLat, west: lon - dLon, east: lon + dLon };
+    return { id, ...area, meshes: [], bbox, backdropBbox: area.backdrop ? backdropBox(area, area.backdrop) : null, rawDir: path.join(RAW, area.raw ?? id), outDir: path.join(ROOT, 'public/tiles', id) };
+  }
   const meshes = meshBlock(area.origin[0], area.origin[1], area.radius);
   const b = meshes.map(meshBounds3);
   const bbox = {

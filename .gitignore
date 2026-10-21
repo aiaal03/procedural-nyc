@@ -32,3 +32,7 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# rendered films and stills (tools/capture) — large; re-create with the capture tools
+film/*
+!film/showcase.ass

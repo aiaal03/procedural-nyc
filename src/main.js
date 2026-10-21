@@ -22,12 +22,13 @@ import { loadBackdrop } from './world/backdrop.js';
 import { WaterMirror } from './world/mirror.js';
 import { ContactShadows, asGround } from './world/contact.js';
 import { LampLight, installLampLight } from './world/lamplight.js';
+import { Walker } from './world/walker.js';
 
 installLampLight(); // (before any material is compiled)
 installSkyLight();
 
 const params = new URLSearchParams(location.search);
-const AREA = params.get('area') || 'tokyo'; // (the first of the city switch)
+const AREA = params.get('area') || 'midtown'; // (the first of the city switch)
 
 // The loading screen (index.html): the city's name, a bar and what is being done.
 const loader = {
@@ -67,17 +68,35 @@ controls.maxDistance = 3500;
 controls.enableZoom = false; // the wheel is handled below, with inertia
 
 const env = new Environment(scene, renderer);
-// Time of day, as Tokyo's clock (JST = UTC + 9 h): the real time, or an hour set by hand.
+// The city's clock: how far its time zone is ahead of UTC at the moment t (ms), daylight saving included.
+const zoneOffset = (tz, t) => {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    .formatToParts(t).map((x) => [x.type, x.value]));
+  return Date.UTC(+p.year, p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - Math.floor(t / 1000) * 1000;
+};
+// Today's sunset at (lon, lat) on the clock of a zone `offset` hours ahead of UTC (NOAA's approximation).
+const sunsetHour = (lon, lat, offset) => {
+  const now = new Date(), day = (Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - Date.UTC(now.getUTCFullYear(), 0, 0)) / 864e5;
+  const g = (2 * Math.PI / 365) * (day - 1 + 0.5), rad = Math.PI / 180;
+  const eq = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) - 0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
+  const decl = 0.006918 - 0.399912 * Math.cos(g) + 0.070257 * Math.sin(g) - 0.006758 * Math.cos(2 * g) + 0.000907 * Math.sin(2 * g) - 0.002697 * Math.cos(3 * g) + 0.00148 * Math.sin(3 * g);
+  const ha = Math.acos(Math.cos(90.833 * rad) / (Math.cos(lat * rad) * Math.cos(decl)) - Math.tan(lat * rad) * Math.tan(decl)) / rad;
+  return ((720 - 4 * lon - eq + 4 * ha) / 60 + offset + 24) % 24;
+};
+// Time of day, as the city's own clock (manifest.tz; Tokyo: JST = UTC + 9 h): by default the golden hour of
+// today (set once the area is known, below); ?time=live for the real time, ?time=18.5 for an hour set by hand.
 const clockTime = {
-  live: params.get('time') == null && params.get('night') !== '1',
-  hour: params.get('time') != null ? Number(params.get('time')) : params.get('night') === '1' ? 22 : 12,
+  tz: 'Asia/Tokyo',
+  live: params.get('time') === 'live',
+  golden: params.get('time') == null && params.get('night') !== '1',
+  hour: params.get('time') != null && params.get('time') !== 'live' ? Number(params.get('time')) : params.get('night') === '1' ? 22 : 12,
   // the day played through: `speed` minutes of Tokyo's clock go by in every second (1: a day in 24 minutes,
   // 100: in about a quarter of a minute)
   play: params.get('play') != null, speed: Number(params.get('play')) || 10,
   advance(dt) { if (this.play) { this.live = false; this.hour = (this.hour + dt * this.speed / 60) % 24; } },
-  // the moment on today's Tokyo date at which its clock shows `hour`
+  // the moment on today's local date at which its clock shows `hour`
   date() {
-    const JST = 9 * 3600e3, now = Date.now();
+    const now = Date.now(), JST = zoneOffset(this.tz, now);
     if (this.live) { const t = new Date(now + JST); this.hour = t.getUTCHours() + t.getUTCMinutes() / 60 + t.getUTCSeconds() / 3600; return new Date(now); }
     const midnight = Math.floor((now + JST) / 864e5) * 864e5 - JST;
     return new Date(midnight + this.hour * 3600e3);
@@ -97,6 +116,9 @@ const signs = new Signs();
 const streamer = new Streamer(scene, materials, props, signs, { base: `tiles/${AREA}`, radius: Number(params.get('radius')) || 900 }); // (what lies round the view by default: the control panel can ask for the whole city)
 loader.set(0.08, 'terrain');
 const manifest = await streamer.init();
+clockTime.tz = manifest.tz ?? 'Asia/Tokyo';
+// the golden hour: about 35 minutes before today's sunset, the sun low and warm
+if (clockTime.golden) clockTime.hour = sunsetHour(manifest.origin.lon, manifest.origin.lat, zoneOffset(clockTime.tz, Date.now()) / 3600e3) - 0.6;
 loader.set(0.14, 'railways and roads');
 const proj = makeProjection(manifest.origin.lon, manifest.origin.lat);
 // Beyond the area: plain ground in the grey of the area's own unbuilt land, out to the haze of the horizon.
@@ -161,6 +183,29 @@ camera.position.copy(controls.target).add(new THREE.Vector3().setFromSphericalCo
   dist, THREE.MathUtils.degToRad(90 - el), THREE.MathUtils.degToRad(az)));
 controls.update();
 
+// ---------------------------------------------------------------- walking
+// Through the eyes of a person on the street (walker.js): the page opens with one, at the area's starting point (manifest.walk:
+// x, z, facing), unless ?walk=0. The button in the corner swaps between walking and the free view from above.
+const walker = new Walker(scene, camera, renderer.domElement, manifest, `tiles/${AREA}`, (x, z) => streamer.ground(x, z));
+{
+  const [wx, wz, wyaw] = (manifest.walk ?? `${cx},${cz},0`).split(',').map(Number);
+  walker.start(wx, wz, wyaw);
+  const button = document.getElementById('walk'), hint = document.getElementById('walk-hint');
+  const setWalking = (on) => {
+    walker.enabled = on; controls.enabled = !on;
+    camera.near = on ? 0.3 : 1; camera.updateProjectionMatrix(); // (a wall at arm's length is not cut away)
+    // (the reflections found on the screen break up on a pane seen close and at a slant: on foot the glass shows the sky)
+    atmosphere.reflect = !on;
+    button.textContent = on ? 'Orbit view' : 'Walk';
+    hint.style.display = on ? '' : 'none';
+    if (on) { controls.target.copy(walker.pos); walker.yaw = Math.atan2(walker.pos.x - camera.position.x, walker.pos.z - camera.position.z) || walker.yaw; walker.pitch = 0; }
+    else { controls.target.copy(walker.pos); camera.position.copy(walker.pos).add(new THREE.Vector3(60, 80, 60)); controls.update(); }
+  };
+  button.addEventListener('click', () => setWalking(!walker.active));
+  if (params.get('walk') !== '0' && !params.get('cam')) { walker.yaw = wyaw; setWalking(true); walker.yaw = wyaw; controls.target.copy(walker.pos); }
+  else setWalking(false);
+}
+
 // ---------------------------------------------------------------- control panel
 let guiState, clockText;
 // The picture on the switch in the corner (see drawOtherMode): kept up with the view all the time (live), or made
@@ -205,7 +250,7 @@ const previewMode = { on: params.get('preview') !== '0', live: params.get('previ
   };
   guiState = state;
   // the names of the cities, for the loading screen of the next visit (index.html reads them)
-  try { for (const a of areas) localStorage.setItem(`procedural-tokyo:name:${a.id}`, a.name); } catch { /* storage unavailable */ }
+  try { for (const a of areas) localStorage.setItem(`procedural-nyc:name:${a.id}`, a.name); } catch { /* storage unavailable */ }
   const gui = new GUI({ title: 'Settings' });
   gui.close(); // (out of the way until it is asked for)
   gui.add(state, 'city', Object.fromEntries(areas.map((a) => [a.name, a.id]))).onChange((id) => {
@@ -215,7 +260,7 @@ const previewMode = { on: params.get('preview') !== '0', live: params.get('previ
     loader.show(areas.find((a) => a.id === id)?.name ?? id, 'leaving for the next city');
     setTimeout(() => { location.href = url.href; }, 60); // (let the screen appear first)
   });
-  const time = gui.addFolder('Time (Tokyo)');
+  const time = gui.addFolder('Time (local)');
   time.add(clockTime, 'live').name('live clock').listen().onChange((v) => { if (v) clockTime.play = false; });
   time.add(clockTime, 'play').name('auto play').listen();
   time.add(clockTime, 'speed', 1, 100, 1).name('speed (min / s)');
@@ -333,12 +378,12 @@ const previewMode = { on: params.get('preview') !== '0', live: params.get('previ
 
   // The panel's settings are kept (in this browser) and are the same for every city: what is switched off in
   // one is off in the next. A URL that sets something itself (?time=, ?cars=, ...) is taken as it stands.
-  const KEY = 'procedural-tokyo:settings:15'; // (a new number when the defaults change: what was kept before is left behind)
+  const KEY = 'procedural-nyc:settings:15'; // (a new number when the defaults change: what was kept before is left behind)
   const explicit = [...params.keys()].some((k) => k !== 'area');
   // (the city is the page's, not a setting; and the abstract model is never kept: the page always opens on the city as it is)
   const strip = (saved) => { delete saved.controllers?.city; delete saved.folders?.['Abstract model']?.controllers?.['abstract model'];
-    // (nor is the hour: the page always opens on Tokyo's own time, the live clock running)
-    for (const k of ['live clock', 'auto play', 'time']) delete saved.folders?.['Time (Tokyo)']?.controllers?.[k];
+    // (nor is the hour: the page always opens on the golden hour of the day)
+    for (const k of ['live clock', 'auto play', 'time']) delete saved.folders?.['Time (local)']?.controllers?.[k];
     return saved;
   };
   if (!explicit) {
@@ -347,7 +392,7 @@ const previewMode = { on: params.get('preview') !== '0', live: params.get('previ
       if (saved) {
         gui.load(strip(saved));
         // (loading the time moved the slider, which stops the live clock: put the saved choice back)
-        const live = saved.folders?.['Time (Tokyo)']?.controllers?.['live clock'];
+        const live = saved.folders?.['Time (local)']?.controllers?.['live clock'];
         if (live != null) clockTime.live = live;
       }
     } catch (e) { console.warn('settings not restored:', e.message); }
@@ -487,16 +532,18 @@ function tick() {
   const dt = Math.min(clock.getDelta(), 0.1);
   clockTime.advance(dt);
   renderer.info.reset();
-  keyboardPan(dt);
-  wheelZoom(dt);
-  glideStep(dt);
-  controls.update();
+  if (walker.active) { walker.update(dt); controls.target.copy(walker.pos); } else {
+    keyboardPan(dt);
+    wheelZoom(dt);
+    glideStep(dt);
+    controls.update();
 
-  // The view keeps its height: the focus stays at the level it was given at the start (the ground there), whatever
-  // the ground does under it as the view is moved — following the terrain made the picture bob up and down.
-  // (Only this is seen to: the camera never goes under the ground.)
-  const floor = streamer.ground(camera.position.x, camera.position.z) + 2;
-  if (camera.position.y < floor) camera.position.y = floor;
+    // The view keeps its height: the focus stays at the level it was given at the start (the ground there), whatever
+    // the ground does under it as the view is moved — following the terrain made the picture bob up and down.
+    // (Only this is seen to: the camera never goes under the ground.)
+    const floor = streamer.ground(camera.position.x, camera.position.z) + 2;
+    if (camera.position.y < floor) camera.position.y = floor;
+  }
 
   streamer.update(controls.target, camera.position);
   // the loading screen stays until the tiles around the view are in
@@ -536,7 +583,7 @@ function tick() {
   const [lon, lat] = proj.unproject(controls.target.x, controls.target.z);
   hud.textContent =
     `${manifest.name}  ${lat.toFixed(5)}N ${lon.toFixed(5)}E  ${controls.target.y.toFixed(1)} m\n` +
-    `Tokyo ${clockTime.label()}${clockTime.live ? ' (live)' : ''} · sun ${env.elevation.toFixed(0)}°\n` +
+    `${clockTime.tz.split('/').pop().replace('_', ' ')} ${clockTime.label()}${clockTime.live ? ' (live)' : ''} · sun ${env.elevation.toFixed(0)}°\n` +
     `${fps.toFixed(0)} fps · ${info.calls} draws · ${(info.triangles / 1e6).toFixed(2)}M tris\n` +
     `tiles ${s.loaded}/${manifest.tiles.length}${streamer.pending ? ` (+${streamer.pending})` : ''} · ${s.buildings} buildings\n` +
     (picked ? `\n▸ ${USAGE[picked.usage] ?? 'usage ' + picked.usage}, ${picked.height.toFixed(1)} m` +
@@ -676,4 +723,4 @@ function frame() {
 requestAnimationFrame(frame);
 
 // (for the console and for tools: tick() draws a frame by hand, clockTime sets the hour)
-window.__app = { scene, camera, controls, streamer, env, renderer, materials, ao, atmosphere, traffic, shared, tick, clockTime, waterMirror, lampLight, contact, props, birds, railways, variant, setVariant };
+window.__app = { walker, scene, camera, controls, streamer, env, renderer, materials, ao, atmosphere, traffic, shared, tick, clockTime, waterMirror, lampLight, contact, props, birds, railways, variant, setVariant };

@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveArea, ROOT, BACKDROP, backdropBox } from './config.mjs';
-import { demTileRange, DEM_SOURCES } from './terrain.mjs';
+import { demTileRange, demSources } from './terrain.mjs';
 
 const area = resolveArea();
 const FORCE = process.argv.includes('--force');
@@ -179,7 +179,7 @@ async function fetchOverpass(name, body) {
 }
 
 async function fetchDem() {
-  for (const src of DEM_SOURCES) {
+  for (const src of demSources(area)) {
     const { z, x0, x1, y0, y1 } = demTileRange(area.bbox, src.zoom);
     const jobs = [];
     for (let x = x0; x <= x1; x++)
@@ -194,22 +194,27 @@ async function fetchDem() {
 }
 
 // Aerial photo: zoom 17 is about 1 m per pixel here, 170 tiles for the area.
+// New York: the city's own 2024 orthophotos (NYC OTI, public).
+const NYC_ORTHO = (z, x, y) => `https://tiles.arcgis.com/tiles/yG5s3afENB5iO9fj/arcgis/rest/services/NYC_Orthos_2024/MapServer/tile/${z}/${y}/${x}`;
 async function fetchOrtho() {
   const z = 17, dir = path.join(ROOT, 'public/ortho', area.id), { x0, x1, y0, y1 } = demTileRange(area.bbox, z);
   const jobs = [];
   for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++)
-    jobs.push({ url: `https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/${z}/${x}/${y}.jpg`, file: path.join(dir, `${z}_${x}_${y}.jpg`) });
+    jobs.push({ url: area.us ? NYC_ORTHO(z, x, y) : `https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/${z}/${x}/${y}.jpg`, file: path.join(dir, `${z}_${x}_${y}.jpg`) });
   const todo = jobs.filter((j) => !exists(j.file));
   log(`aerial photo: ${jobs.length} tiles, ${todo.length} to download`);
   await pool(todo, 4, async (j) => { try { await download(j.url, j.file); } catch (e) { log(`  ${e.message} (left as a gap)`); } });
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify({ z, x0, x1, y0, y1, attribution: 'Aerial photo: Geospatial Information Authority of Japan (GSI) seamlessphoto' }));
+  fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify({ z, x0, x1, y0, y1, attribution: area.us ? 'Aerial photo: NYC Office of Technology and Innovation, 2024 orthoimagery' : 'Aerial photo: Geospatial Information Authority of Japan (GSI) seamlessphoto' }));
 }
 
 // The land around the area: coarse elevation, and a coarse aerial photo for the client to lay over it.
 async function fetchBackdrop() {
   if (!area.backdropBbox) return;
-  const dem = (z, x, y) => `https://cyberjapandata.gsi.go.jp/xyz/dem_png/${z}/${x}/${y}.png`, photo = (z, x, y) => `https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/${z}/${x}/${y}.jpg`;
+  // (New York: Terrarium elevation, and Esri's world imagery for the land beyond the city's own photos: New Jersey,
+  // Brooklyn, Queens and the rivers)
+  const dem = area.us ? (z, x, y) => `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png` : (z, x, y) => `https://cyberjapandata.gsi.go.jp/xyz/dem_png/${z}/${x}/${y}.png`;
+  const photo = area.us ? (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}` : (z, x, y) => `https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/${z}/${x}/${y}.jpg`;
   const out = path.join(ROOT, 'public/ortho', area.id, 'backdrop');
   const sets = [
     { box: area.backdropBbox, zoom: BACKDROP.zoom, url: dem, dir: path.join(area.rawDir, 'dem', 'backdrop'), ext: 'png' },
@@ -226,12 +231,41 @@ async function fetchBackdrop() {
   }
 }
 
+// NYC Open Data (Socrata): building footprints with roof heights, and the planimetric roadbed and sidewalks.
+const NYC_SETS = { 'nyc_buildings.json': '5zhs-2jue', 'nyc_roadbed.json': 'i36f-5ih7', 'nyc_sidewalk.json': '52n9-sdep' };
+async function fetchNyc() {
+  const { south, west, north, east } = area.bbox;
+  for (const [name, id] of Object.entries(NYC_SETS)) {
+    const file = path.join(area.rawDir, name);
+    if (exists(file)) { log(`nyc ${name}: cached`); continue; }
+    const rows = [];
+    for (let offset = 0; ; offset += 20000) {
+      const q = new URLSearchParams({ $where: `within_box(the_geom, ${north}, ${west}, ${south}, ${east})`, $limit: '20000', $offset: String(offset), $order: ':id' });
+      const page = JSON.parse(await download(`https://data.cityofnewyork.us/resource/${id}.json?${q}`, file + '.page'));
+      rows.push(...page);
+      if (page.length < 20000) break;
+    }
+    fs.rmSync(file + '.page', { force: true });
+    fs.writeFileSync(file, JSON.stringify(rows));
+    log(`nyc ${name}: ${rows.length} features`);
+  }
+}
+// OSM buildings and building parts with their outlines: the parts carry the setbacks and spires of the towers
+// (height, min_height), the buildings their use.
+if (area.us) OSM_QUERIES['osm_buildings.json'] = `(
+  way["building"]({bb});
+  way["building:part"]({bb});
+  relation["building"]({bb});
+  relation["building:part"]({bb});
+);
+out geom tags;`;
+
 log(`area ${area.id}: meshes ${area.meshes.join(' ')}`);
 log(`bbox lat ${area.bbox.south.toFixed(5)}..${area.bbox.north.toFixed(5)} lon ${area.bbox.west.toFixed(5)}..${area.bbox.east.toFixed(5)}`);
 // (OpenStreetMap last: its servers are the ones that keep one waiting, and the rest is the bulk of the download)
 await fetchDem();
 await fetchOrtho();
 await fetchBackdrop();
-await fetchPlateau();
+if (area.us) await fetchNyc(); else await fetchPlateau();
 await fetchOsm();
 log('done');

@@ -1,8 +1,8 @@
 {
-  "name": "procedural-tokyo",
+  "name": "procedural-nyc",
   "version": "0.1.0",
   "private": true,
-  "description": "A real-time 3D Tokyo in the browser, compiled from public data (PLATEAU, OpenStreetMap, GSI) with procedural detail",
+  "description": "A real-time 3D New York in the browser, compiled from public data (NYC Open Data, OpenStreetMap) with procedural detail; a fork of Procedural Tokyo",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -29,6 +29,7 @@
     "three": "^0.186.1"
   },
   "devDependencies": {
+    "puppeteer-core": "^24.43.1",
     "sharp": "^0.35.5",
     "vite": "^8.3.2"
   }

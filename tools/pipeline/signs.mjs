@@ -7,6 +7,8 @@ import fs from 'node:fs';
 
 export const SIGN = { FASCIA: 0, BLADE: 1, TITLE: 2, BILLBOARD: 3, SCREEN: 4, ROOFTOP: 5, BANNER: 6 };
 const POSTERS = 24, BANNERS = 8; // invented posters in the client's atlas (src/world/ads.js); a sign's colour field picks one
+// New York (placeAdsNyc): advertisements of invented brands, photographed — 16 wide (16:9) and 8 tall (9:16)
+export const WIDE_ADS = 16, TALL_ADS = 8;
 
 // Colour schemes [background, text]; the index is stored per sign and must match SIGN_COLORS in the client.
 export const SIGN_COLORS = [
@@ -87,6 +89,61 @@ export function placeAds(buildings, centre = [0, 0]) {
         if (width > 4) ads.push({ style: SIGN.ROOFTOP, color: Math.floor(h3 * 991) % POSTERS, x: mx - w.nx * 0.6, z: mz - w.nz * 0.6, y: b.base + b.height + 1.6 + h / 2, nx: w.nx, nz: w.nz, w: width, h, text: '' });
       }
     });
+  });
+  return ads;
+}
+
+// New York's advertising: Times Square walled in screens, and elsewhere only now and then a large billboard on a
+// wall or a roof. square: [[x, z], [x, z]], the axis of Times Square (One Times Square to Duffy Square); a wall that
+// looks onto it within `reach` metres carries screens, as wide as the wall and stacked up to three high.
+// Poster indices: 0..WIDE_ADS-1 wide, then the tall ones.
+export function placeAdsNyc(buildings, square, reach = 42) {
+  const ads = [], [[ax, az], [bx, bz]] = square, L = Math.hypot(bx - ax, bz - az);
+  const onAxis = (x, z) => { const t = Math.max(0, Math.min(L, ((x - ax) * (bx - ax) + (z - az) * (bz - az)) / L)); return [ax + ((bx - ax) * t) / L, az + ((bz - az) * t) / L]; };
+  const wide = (k) => Math.floor(k * 9973) % WIDE_ADS, tall = (k) => WIDE_ADS + (Math.floor(k * 9973) % TALL_ADS);
+  // a wall drawn as several short edges in a row (a slightly bent or finely mapped front) taken as one long wall
+  const merged = (walls) => {
+    const out = [];
+    for (const w of walls) {
+      const p = out.at(-1);
+      if (p && p.dx * w.dx + p.dz * w.dz > 0.985 && Math.hypot(p.ax + p.dx * p.len - w.ax, p.az + p.dz * p.len - w.az) < 0.5) {
+        const ex = w.ax + w.dx * w.len, ez = w.az + w.dz * w.len, len = Math.hypot(ex - p.ax, ez - p.az);
+        Object.assign(p, { dx: (ex - p.ax) / len, dz: (ez - p.az) / len, len, street: p.street || w.street });
+        p.nx = -p.dz; p.nz = p.dx;
+      } else out.push({ ...w });
+    }
+    return out;
+  };
+  buildings.forEach((b, bi) => {
+    if (b.height < 12 || !b.walls) return;
+    let square = 0;
+    for (const [wi, w] of merged(b.walls).entries()) {
+      const mx = w.ax + w.dx * w.len / 2, mz = w.az + w.dz * w.len / 2, [px, pz] = onAxis(mx, mz), d = Math.hypot(px - mx, pz - mz);
+      const facing = ((px - mx) * w.nx + (pz - mz) * w.nz) / (d || 1);
+      if (d < reach && facing > 0.35 && w.len >= 5) {
+        // Times Square: screens from the second floor up, one above the other
+        square++;
+        const isTall = w.len < 11, width = isTall ? w.len * 0.9 : Math.min(w.len * 0.96, 52), h = isTall ? Math.min(width * 16 / 9, 24) : width * 9 / 16;
+        const top = b.base + Math.min(b.height - 1.5, 100);
+        for (let row = 0, y = b.base + 6; row < 4 && y + h <= top; row++, y += h + 0.8) {
+          const k = hash('ts' + bi + ':' + wi + ':' + row);
+          ads.push({ style: SIGN.SCREEN, color: isTall ? tall(k) : wide(k), x: mx, z: mz, y: y + h / 2, nx: w.nx, nz: w.nz, w: width, h, text: '' });
+        }
+        continue;
+      }
+      if (!w.street || w.len < 11 || b.usage < 401 || b.usage > 414) continue;
+      // elsewhere: a billboard now and then, more of them near the square
+      const ds = Math.hypot(px - mx, pz - mz), k = hash('bb' + bi + ':' + wi);
+      if (k > (ds < 500 ? 0.1 : ds < 1200 ? 0.04 : 0.015)) continue;
+      const width = Math.min(w.len * 0.72, 16), h = width * 9 / 16, y = b.base + Math.max(8 + h / 2, b.height * 0.5);
+      if (y + h / 2 < b.base + b.height - 1) ads.push({ style: ds < 400 && k < 0.04 ? SIGN.SCREEN : SIGN.BILLBOARD, color: wide(hash('bp' + bi + wi)), x: mx, z: mz, y, nx: w.nx, nz: w.nz, w: width, h, text: '' });
+    }
+    // the old New York rooftop billboard, on low buildings away from the square
+    const w = b.walls.filter((q) => q.street && q.len >= 9).sort((p, q) => q.len - p.len)[0];
+    if (!square && w && b.height < 40 && hash('roof' + bi) < 0.01) {
+      const width = Math.min(w.len * 0.8, 14), h = width * 9 / 16, mx = w.ax + w.dx * w.len / 2, mz = w.az + w.dz * w.len / 2;
+      ads.push({ style: SIGN.ROOFTOP, color: wide(hash('rp' + bi)), x: mx - w.nx * 0.6, z: mz - w.nz * 0.6, y: b.base + b.height + 1.6 + h / 2, nx: w.nx, nz: w.nz, w: width, h, text: '' });
+    }
   });
   return ads;
 }

@@ -137,7 +137,8 @@ const BACKSTREET = new Set(['residential', 'unclassified', 'living_street', 'ter
 
 // land: [{ kind, ring: [[x, z]] }] in world metres; edges: road graph edges with pts [x, y, z, ...];
 // idx: { building, road, carriageway, sidewalk, water } PolyIndex. Returns { props, wires }.
-export function placeProps({ land, trees, treeRows, vending, edges, idx, inBounds }) {
+// poles: false leaves out the overhead lines (New York's run underground)
+export function placeProps({ land, trees, treeRows, vending, edges, idx, inBounds, poles = true }) {
   const props = [], wires = [];
   const taken = new Set();
   const free = (x, z, cell) => { const k = Math.floor(x / cell) + ',' + Math.floor(z / cell); if (taken.has(k)) return false; taken.add(k); return true; };
@@ -205,7 +206,7 @@ export function placeProps({ land, trees, treeRows, vending, edges, idx, inBound
       }, 3 + (ei % 5));
     }
 
-    if (BACKSTREET.has(hw)) {
+    if (poles && BACKSTREET.has(hw)) {
       // utility poles along one side of the street, joined by wires; a vending machine by some of them
       const side = hash(e.way, 3) < 0.5 ? 1 : -1;
       carry = forEachAlong(pts, 30, (x, z, dx, dz) => {

@@ -10,6 +10,14 @@ export const DEM_SOURCES = [
   { id: 'dem5a', zoom: 15, url: (z, x, y) => `https://cyberjapandata.gsi.go.jp/xyz/dem5a_png/${z}/${x}/${y}.png` },
   { id: 'dem10b', zoom: 14, url: (z, x, y) => `https://cyberjapandata.gsi.go.jp/xyz/dem_png/${z}/${x}/${y}.png` },
 ];
+// Outside Japan: the Terrarium tiles of the open elevation dataset on AWS (USGS 3DEP in the United States, about
+// 3.6 m a pixel at zoom 15 in New York). h = R * 256 + G + B / 256 - 32768; the rivers' beds are clamped to the water line.
+const TERRARIUM = (z, x, y) => `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`;
+export const US_DEM_SOURCES = [
+  { id: 'terrarium15', zoom: 15, url: TERRARIUM, terrarium: true },
+  { id: 'terrarium13', zoom: 13, url: TERRARIUM, terrarium: true },
+];
+export const demSources = (area) => (area.us ? US_DEM_SOURCES : DEM_SOURCES);
 
 const worldPx = (lon, lat, z) => {
   const s = 256 * 2 ** z, phi = (lat * Math.PI) / 180;
@@ -32,7 +40,9 @@ function demSource(dir, src) {
     if (fs.existsSync(f)) {
       const png = PNG.sync.read(fs.readFileSync(f));
       h = new Float32Array(256 * 256);
-      for (let i = 0; i < h.length; i++) {
+      if (src.terrarium) for (let i = 0; i < h.length; i++)
+        h[i] = Math.max(0, png.data[i * 4] * 256 + png.data[i * 4 + 1] + png.data[i * 4 + 2] / 256 - 32768);
+      else for (let i = 0; i < h.length; i++) {
         const v = (png.data[i * 4] << 16) | (png.data[i * 4 + 1] << 8) | png.data[i * 4 + 2];
         h[i] = v === 0x800000 ? NaN : v < 0x800000 ? v * 0.01 : (v - 0x1000000) * 0.01;
       }
@@ -54,8 +64,8 @@ function demSource(dir, src) {
 }
 
 // The land around an area: a coarse height grid from the backdrop DEM tiles (the sea, which has no data, is 0).
-export function buildBackdropGrid(dir, proj, { minX, maxX, minZ, maxZ }, step, zoom) {
-  const sample = demSource(dir, { id: 'backdrop', zoom });
+export function buildBackdropGrid(dir, proj, { minX, maxX, minZ, maxZ }, step, zoom, terrarium = false) {
+  const sample = demSource(dir, { id: 'backdrop', zoom, terrarium });
   const w = Math.floor((maxX - minX) / step) + 1, h = Math.floor((maxZ - minZ) / step) + 1, data = new Float32Array(w * h);
   for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
     const v = sample(...proj.unproject(minX + i * step, minZ + j * step));
@@ -66,8 +76,8 @@ export function buildBackdropGrid(dir, proj, { minX, maxX, minZ, maxZ }, step, z
 
 // Builds a height grid covering [minX, maxX] x [minZ, maxZ] at `step` metres.
 // Gaps in the 5 m DEM fall back to the 10 m DEM, then to a diffusion fill from neighbours.
-export function buildHeightGrid(dir, proj, { minX, maxX, minZ, maxZ }, step) {
-  const samplers = DEM_SOURCES.map((s) => demSource(dir, s));
+export function buildHeightGrid(dir, proj, { minX, maxX, minZ, maxZ }, step, sources = DEM_SOURCES) {
+  const samplers = sources.map((s) => demSource(dir, s));
   const w = Math.floor((maxX - minX) / step) + 1, h = Math.floor((maxZ - minZ) / step) + 1;
   const data = new Float32Array(w * h);
   let fallback = 0, holes = 0;

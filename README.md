@@ -1,3 +1,73 @@
+# Procedural New York
+
+Manhattan in the browser, in three.js — walk it, jump, and take off and fly over it. Real buildings from public
+data, procedural detail on top, day and night, traffic, and Times Square walled in screens.
+
+A fork of [Procedural Tokyo](https://github.com/jeantimex/tokyo) by **jeantimex** (MIT): the engine — tile
+streaming, generated facades, traffic, atmosphere and clouds, water, lamps at night — is theirs; this fork swaps the
+city for New York and adds a first-person mode.
+
+![Times Square](docs/times-square.jpg)
+
+| | |
+|---|---|
+| ![First person](docs/walk-mode.jpg) | ![Seventh Avenue](docs/seventh-avenue.jpg) |
+
+## What is new here
+
+- **New York data.** Every building of NYC's Building Footprints with its roof height, and OpenStreetMap's
+  `building:part`s for the setbacks and spires of the towers (Empire State, Chrysler, One Vanderbilt, Billionaires'
+  Row ...); roadbed and sidewalks from the city's planimetric survey; NYC's 2024 orthophotos on the ground; the
+  land around (New Jersey, Brooklyn, Queens, the rivers) on terrain from USGS 3DEP. Code: `tools/pipeline/nyc.mjs`.
+- **First person.** The page opens on foot in Times Square: WASD to walk, Shift to run, the mouse to look round,
+  Space to jump, Space twice to fly (Space up, C down), twice again to land. You stand on the ground and on roofs
+  and do not walk through walls. `src/world/walker.js`; the *Orbit view* button switches to the free camera.
+- **Times Square screens.** Walls facing the square carry LED screens as wide as the wall, stacked; elsewhere an
+  occasional billboard and the odd rooftop sign. The advertisements are invented brands, made with an image model
+  (`public/ads`) — no real brand is used. `placeAdsNyc` in `tools/pipeline/signs.mjs`, `src/world/ads.js`.
+- **The city's own clock.** Time zone per area (`America/New_York`), and the page opens at today's golden hour,
+  worked out from the sunset (`?time=live` for the real time, `?time=21` for an hour, N for day/night).
+- **What if:** `?area=twintowers` is Lower Manhattan with the World Trade Center of 1973 standing instead of
+  today's (`tools/pipeline/whatif.mjs`).
+- Fixes along the way: a NaN in the atmosphere's sky that turned the whole scene black at some places on the globe;
+  long street polygons cut at tile edges so no street loses its asphalt; outlines standing on sidewalks dropped.
+- **Films in code.** `tools/capture/` drives headless Chrome on a virtual clock, frame by frame, along scripted
+  camera paths (`shots-*.mjs`) — how the showcase video was made.
+
+## Running it
+
+```
+npm install
+node tools/assets/fetch_textures.mjs        # once: CC0 textures (Poly Haven)
+npm run fetch -- --area=midtown             # raw data -> data/raw/midtown, photos -> public/ortho/midtown
+npm run compile -- --area=midtown           # -> public/tiles/midtown
+npm run dev                                 # http://localhost:5280/?area=midtown
+```
+
+Areas: `midtown` (Times Square, the Empire State, Grand Central, Hudson Yards), `downtown` (Lower Manhattan),
+`twintowers`. The compiled city is not in the repository: a fetch is a few hundred MB, a compile takes seconds.
+
+A film, frame by frame (Chrome from `CHROME`, or where macOS keeps it):
+
+```
+node tools/capture/film.mjs tools/capture/shots-showcase.mjs out/ 1920x1080 30
+```
+
+## Data and licences
+
+The code is MIT (see LICENSE). The data keeps its sources' terms: buildings, roadbed, sidewalks and orthophotos
+from NYC Open Data / NYC OTI; buildings, building parts, roads and railways © OpenStreetMap contributors (ODbL — a
+compiled area you redistribute is a derived database under the ODbL); elevation from USGS 3DEP via the Terrarium
+tiles of the AWS open elevation dataset; the imagery of the surroundings from Esri World Imagery (fetched for your
+own use; check Esri's terms before you publish it); textures Poly Haven (CC0); atmosphere and clouds takram
+three-geospatial (MIT).
+
+---
+
+The original README follows.
+
+---
+
 # Procedural Tokyo
 
 A real-time 3D model of Tokyo in the browser, compiled from public data with procedural detail on top.

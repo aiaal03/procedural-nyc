@@ -195,23 +195,24 @@ function category(usage, height, seed) {
   return height < 9 ? CAT.HOUSE : seed < 0.5 ? CAT.APARTMENT : CAT.COMMERCIAL;
 }
 
-// Tokyo wall finishes per category: [r, g, b, texture layer].
+// New York wall finishes per category: [r, g, b, texture layer] — brownstone and brick row houses, red, tan and
+// dark brick walk-ups, limestone and terracotta pre-war blocks, granite and glass towers.
 const PALETTE = {
   [CAT.HOUSE]: [
-    [0.86, 0.83, 0.75, WALL.PLASTER], [0.9, 0.9, 0.87, WALL.PLASTER], [0.5, 0.4, 0.33, WALL.BRICK], [0.66, 0.66, 0.65, WALL.SIDING],
-    [0.3, 0.33, 0.37, WALL.SIDING], [0.78, 0.72, 0.62, WALL.PLASTER], [0.82, 0.8, 0.74, WALL.SIDING], [0.42, 0.36, 0.32, WALL.SIDING],
+    [0.42, 0.29, 0.23, WALL.BRICK], [0.36, 0.25, 0.2, WALL.PLASTER], [0.56, 0.3, 0.23, WALL.BRICK], [0.78, 0.72, 0.6, WALL.PLASTER],
+    [0.62, 0.42, 0.32, WALL.BRICK], [0.82, 0.77, 0.66, WALL.TILE], [0.48, 0.33, 0.27, WALL.BRICK],
   ],
   [CAT.APARTMENT]: [
-    [0.9, 0.89, 0.85, WALL.TILE], [0.82, 0.77, 0.68, WALL.TILE], [0.55, 0.4, 0.31, WALL.BRICK], [0.72, 0.72, 0.7, WALL.PLASTER],
-    [0.76, 0.66, 0.55, WALL.TILE], [0.62, 0.48, 0.38, WALL.BRICK],
+    [0.56, 0.3, 0.23, WALL.BRICK], [0.68, 0.55, 0.42, WALL.BRICK], [0.4, 0.26, 0.21, WALL.BRICK], [0.8, 0.76, 0.66, WALL.CONCRETE],
+    [0.82, 0.8, 0.74, WALL.BRICK], [0.6, 0.38, 0.28, WALL.BRICK], [0.74, 0.66, 0.54, WALL.TILE],
   ],
-  [CAT.MIXED]: [[0.84, 0.82, 0.78, WALL.TILE], [0.6, 0.45, 0.36, WALL.BRICK], [0.72, 0.72, 0.71, WALL.CONCRETE], [0.88, 0.84, 0.74, WALL.TILE]],
+  [CAT.MIXED]: [[0.58, 0.32, 0.24, WALL.BRICK], [0.7, 0.6, 0.47, WALL.BRICK], [0.78, 0.73, 0.63, WALL.CONCRETE], [0.44, 0.29, 0.23, WALL.BRICK]],
   [CAT.COMMERCIAL]: [
-    [0.68, 0.69, 0.7, WALL.CONCRETE], [0.86, 0.86, 0.84, WALL.TILE], [0.76, 0.71, 0.63, WALL.TILE], [0.34, 0.35, 0.37, WALL.CONCRETE],
-    [0.56, 0.57, 0.59, WALL.CONCRETE], [0.8, 0.8, 0.79, WALL.PLASTER],
+    [0.76, 0.7, 0.6, WALL.CONCRETE], [0.82, 0.78, 0.7, WALL.TILE], [0.72, 0.56, 0.43, WALL.TILE], [0.55, 0.55, 0.56, WALL.CONCRETE],
+    [0.34, 0.33, 0.34, WALL.CONCRETE], [0.66, 0.6, 0.52, WALL.CONCRETE], [0.6, 0.38, 0.29, WALL.BRICK],
   ],
-  [CAT.PUBLIC]: [[0.78, 0.76, 0.72, WALL.TILE], [0.64, 0.64, 0.62, WALL.CONCRETE], [0.7, 0.62, 0.54, WALL.BRICK]],
-  [CAT.GLASS]: [[0.5, 0.53, 0.56, WALL.CONCRETE], [0.62, 0.63, 0.64, WALL.CONCRETE], [0.32, 0.35, 0.38, WALL.CONCRETE]],
+  [CAT.PUBLIC]: [[0.8, 0.75, 0.65, WALL.CONCRETE], [0.66, 0.62, 0.56, WALL.TILE], [0.58, 0.36, 0.28, WALL.BRICK]],
+  [CAT.GLASS]: [[0.3, 0.38, 0.43, WALL.CONCRETE], [0.42, 0.48, 0.52, WALL.CONCRETE], [0.24, 0.28, 0.32, WALL.CONCRETE], [0.5, 0.55, 0.56, WALL.CONCRETE]],
 };
 // Metal and tile roofs on houses.
 const PITCHED_ROOFS = [[0.2, 0.21, 0.23], [0.22, 0.28, 0.36], [0.3, 0.22, 0.18], [0.42, 0.25, 0.2], [0.2, 0.28, 0.25], [0.34, 0.34, 0.35]];
@@ -225,7 +226,7 @@ const SINK = 4; // walls run this far below the base so they meet sloping ground
 // takes its colour from the palette above, which is brighter and warmer — the two met at a line across the city.
 // A generated colour is brought most of the way to the photographed city's: its brightness into the same
 // range, its hue towards the same cool grey, some of its own character left.
-const AERIAL = 0.72;
+const AERIAL = 0.25; // (New York: the generated colours mostly kept — there are no photographed walls to meet)
 const aerial = (c) => {
   const l = 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2], to = 0.41 + 0.24 * Math.min(1, Math.max(0, (l - 0.3) / 0.6)), k = to / Math.max(l, 0.05);
   const grey = [to * 0.93, to * 1.02, to * 1.08];

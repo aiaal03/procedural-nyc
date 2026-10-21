@@ -19,13 +19,16 @@ import { makeProjection, TILE, tileOf, tileKey } from '../../src/shared/geo.js';
 import { encodeTile, AREA, BFLAG, PROP, VERSION } from '../../src/shared/tileformat.js';
 import { readBuildings, readRoads } from './citygml.mjs';
 import { readOsm, buildRoadGraph, buildRailways } from './osm.mjs';
-import { buildHeightGrid, sampleGrid, buildBackdropGrid } from './terrain.mjs';
+import { buildHeightGrid, sampleGrid, buildBackdropGrid, demSources } from './terrain.mjs';
+import { readNycBuildings, readNycStreets } from './nyc.mjs';
+import { onSite, WTC, PLAZA } from './whatif.mjs';
+import polygonClipping from 'polygon-clipping';
 import { BACKDROP, AREAS } from './config.mjs';
 import { PolyIndex, readLand, clipRing, placeProps } from './landscape.mjs';
 import { buildMarkings } from './markings.mjs';
 import { splitOutlineRoads } from './roadsplit.mjs';
 import { profileRailways } from './rails.mjs';
-import { readPlaces, placeSigns, placeAds } from './signs.mjs';
+import { readPlaces, placeSigns, placeAds, placeAdsNyc } from './signs.mjs';
 import { placeFurniture } from './furniture.mjs';
 import { readExtra, buildExtras } from './extras.mjs';
 import { readModels, encodeMesh } from './meshes.mjs';
@@ -46,6 +49,9 @@ const [minX, maxZ] = proj.project(area.bbox.west, area.bbox.south);
 const [maxX, minZ] = proj.project(area.bbox.east, area.bbox.north);
 const bounds = { minX, maxX, minZ, maxZ };
 const inBounds = (x, z) => x >= minX && x <= maxX && z >= minZ && z <= maxZ;
+// the World Trade Center's superblock, cleared for the towers (area.twinTowers): drawn in from the street lines so
+// that the streets round it stay
+const cleared = area.twinTowers ? (x, z, inset = 14) => onSite(x, z, inset) : () => false;
 log(`area ${area.id}: ${(maxX - minX).toFixed(0)} x ${(maxZ - minZ).toFixed(0)} m around [${area.origin}]`);
 
 // ---------------------------------------------------------------- geometry helpers
@@ -107,7 +113,7 @@ const centroidOf = (polys) => {
 };
 
 // ---------------------------------------------------------------- terrain
-const grid = buildHeightGrid(path.join(area.rawDir, 'dem'), proj, bounds, TERRAIN_STEP);
+const grid = buildHeightGrid(path.join(area.rawDir, 'dem'), proj, bounds, TERRAIN_STEP, demSources(area));
 let gMin = Infinity, gMax = -Infinity;
 for (const v of grid.data) { gMin = Math.min(gMin, v); gMax = Math.max(gMax, v); }
 log(`terrain ${grid.w} x ${grid.h} @ ${TERRAIN_STEP} m, ${gMin.toFixed(1)}..${gMax.toFixed(1)} m TP` +
@@ -124,6 +130,7 @@ const tileFor = (x, z) => {
 // Point-in-polygon indexes used to place paint, trees and street furniture.
 const idx = { building: new PolyIndex(), road: new PolyIndex(), carriageway: new PolyIndex(), sidewalk: new PolyIndex(), water: new PolyIndex() };
 const plateauDir = path.join(area.rawDir, 'plateau');
+fs.mkdirSync(plateauDir, { recursive: true }); // (New York has no PLATEAU files: the stages that read them find none)
 const gmlFiles = (type) => fs.readdirSync(plateauDir).filter((f) => new RegExp(`^\\d{8}_${type}(_\\d+)?\\.gml$`).test(f)).sort();
 
 // bridges, street furniture and trees that PLATEAU gives as finished models
@@ -176,14 +183,16 @@ for (const f of gmlFiles('bldg')) {
   log(`  ${f}: ${list.length} buildings`);
 }
 const pct = (arr, p) => { const s = [...arr].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(p * s.length))]; };
-const nB = bstats.read - bstats.dup - bstats.dropped;
-log(`buildings: ${nB} kept from ${bstats.files} files (${bstats.dup} duplicates across ward files, ${bstats.dropped} dropped, ` +
-  `${bstats.noSolid} without LOD1 solid, ${bstats.lod2} with LOD2)`);
-log(`  LOD2 shells: ${bstats.surfaces} surfaces`);
-log(`  height median ${pct(bstats.heights, 0.5).toFixed(1)} m, p95 ${pct(bstats.heights, 0.95).toFixed(1)} m, max ${pct(bstats.heights, 1).toFixed(1)} m`);
-const absDiff = bstats.baseDiff.map(Math.abs);
-log(`  building base vs DEM: median |d| ${pct(absDiff, 0.5).toFixed(2)} m, p95 ${pct(absDiff, 0.95).toFixed(2)} m`);
-log(`  usage codes: ${Object.entries(bstats.usage).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}:${v}`).join(' ')}`);
+if (!area.us) {
+  const nB = bstats.read - bstats.dup - bstats.dropped;
+  log(`buildings: ${nB} kept from ${bstats.files} files (${bstats.dup} duplicates across ward files, ${bstats.dropped} dropped, ` +
+    `${bstats.noSolid} without LOD1 solid, ${bstats.lod2} with LOD2)`);
+  log(`  LOD2 shells: ${bstats.surfaces} surfaces`);
+  log(`  height median ${pct(bstats.heights, 0.5).toFixed(1)} m, p95 ${pct(bstats.heights, 0.95).toFixed(1)} m, max ${pct(bstats.heights, 1).toFixed(1)} m`);
+  const absDiff = bstats.baseDiff.map(Math.abs);
+  log(`  building base vs DEM: median |d| ${pct(absDiff, 0.5).toFixed(2)} m, p95 ${pct(absDiff, 0.95).toFixed(2)} m`);
+  log(`  usage codes: ${Object.entries(bstats.usage).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}:${v}`).join(' ')}`);
+}
 
 const seenRoads = new Set();
 const rstats = { roads: 0, outlines: 0, areas: [0, 0, 0, 0, 0] };
@@ -207,8 +216,68 @@ for (const f of gmlFiles('tran')) {
     for (const a of r.areas) push(a.kind, a.code, a.polygons);
   }
 }
-log(`roads (PLATEAU): ${rstats.roads} roads, ${rstats.outlines} outlines; detailed areas: carriageway ${rstats.areas[AREA.CARRIAGEWAY]}, ` +
+if (!area.us) log(`roads (PLATEAU): ${rstats.roads} roads, ${rstats.outlines} outlines; detailed areas: carriageway ${rstats.areas[AREA.CARRIAGEWAY]}, ` +
   `sidewalk ${rstats.areas[AREA.SIDEWALK]}, island ${rstats.areas[AREA.ISLAND]}, other ${rstats.areas[AREA.OTHER]}`);
+
+// ---------------------------------------------------------------- New York
+// Buildings from OSM (with the parts that carry the towers' setbacks) and NYC's footprints; the carriageway and
+// the sidewalks from the city's planimetric survey.
+if (area.us) {
+  const { buildings, stats } = readNycBuildings(path.join(area.rawDir, 'osm_buildings.json'), path.join(area.rawDir, 'nyc_buildings.json'));
+  const heights = [];
+  let kept = 0;
+  for (const b of buildings) {
+    const polys = cleanPolygons(b.polygons);
+    if (!polys.length) continue;
+    const [cx, cz] = centroidOf(polys);
+    if (!inBounds(cx, cz) || cleared(cx, cz, 0)) continue;
+    heights.push(b.minHeight + b.height); kept++;
+    tileFor(cx, cz).buildings.push({ usage: b.usage, storeys: b.storeys, flags: BFLAG.NO_SOLID, base: r2(ground(cx, cz) + b.minHeight), height: r2(b.height),
+      measuredHeight: r2(b.minHeight + b.height), polygons: polys, surfaces: [], lift: b.minHeight, ...(b.hint ? { hint: b.hint } : {}) });
+  }
+  if (area.twinTowers) for (const b of WTC) {
+    const ring = b.ring.map(([x, z]) => [r2(x), r2(z)]);
+    if (areaEN(ring) < 0) ring.reverse();
+    const [cx, cz] = centroidOf([[ring]]);
+    tileFor(cx, cz).buildings.push({ usage: b.usage, storeys: b.storeys ?? 0, flags: BFLAG.NO_SOLID, base: r2(ground(cx, cz) + (b.minHeight ?? 0)), height: b.height,
+      measuredHeight: (b.minHeight ?? 0) + b.height, polygons: [[ring]], surfaces: [], hint: b.hint });
+  }
+  if (area.twinTowers) log(`what if: the World Trade Center of 1973 rebuilt, ${WTC.length} parts`);
+  log(`buildings (OSM + NYC footprints): ${kept} kept of ${buildings.length}; ${Object.entries(stats).map(([k, v]) => `${k} ${v}`).join(', ')}`);
+  log(`  top median ${pct(heights, 0.5).toFixed(1)} m, p95 ${pct(heights, 0.95).toFixed(1)} m, max ${pct(heights, 1).toFixed(1)} m`);
+  const sstats = { roadbed: 0, sidewalk: 0 };
+  for (const { kind, polygons: raw } of readNycStreets(path.join(area.rawDir, 'nyc_roadbed.json'), path.join(area.rawDir, 'nyc_sidewalk.json'))) {
+    const polygons = cleanPolygons(raw, 0.2);
+    if (!polygons.length) continue;
+    const [cx, cz] = centroidOf(polygons);
+    if (!inBounds(cx, cz) || cleared(cx, cz, 15)) continue;
+    const k = kind === 'roadbed' ? AREA.CARRIAGEWAY : AREA.SIDEWALK;
+    for (const rings of polygons) { idx.road.add(rings); (k === AREA.CARRIAGEWAY ? idx.carriageway : idx.sidewalk).add(rings); }
+    // An avenue's roadbed can run a kilometre: it is cut at the tile edges (holes kept: the blocks inside a sidewalk,
+    // the medians in a roadbed), so that each tile streams its own stretch of it and none is left out.
+    for (const rings of polygons) {
+      let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+      for (const [x, z] of rings[0]) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); }
+      const tx0 = Math.floor(x0 / TILE), tx1 = Math.floor(x1 / TILE), tz0 = Math.floor(z0 / TILE), tz1 = Math.floor(z1 / TILE);
+      if (tx0 === tx1 && tz0 === tz1) { tileFor(...centroidOf([rings])).areas.push({ kind: k, code: 0, polygons: [rings] }); continue; }
+      const closed = rings.map((r) => [...r, r[0]]);
+      for (let tx = tx0; tx <= tx1; tx++) for (let tz = tz0; tz <= tz1; tz++) {
+        const sq = [[[tx * TILE, tz * TILE], [(tx + 1) * TILE, tz * TILE], [(tx + 1) * TILE, (tz + 1) * TILE], [tx * TILE, (tz + 1) * TILE], [tx * TILE, tz * TILE]]];
+        let pieces;
+        try { pieces = polygonClipping.intersection(closed, sq); } catch { continue; }
+        for (const piece of pieces) {
+          const poly = piece.map((r) => r.slice(0, -1).map(([x, z]) => [r2(x), r2(z)])).filter((r) => r.length >= 3);
+          if (!poly.length || Math.abs(areaEN(poly[0])) < 0.2) continue;
+          if (areaEN(poly[0]) < 0) poly[0].reverse();
+          for (const h of poly.slice(1)) if (areaEN(h) > 0) h.reverse();
+          if (inBounds((tx + 0.5) * TILE, (tz + 0.5) * TILE) || inBounds(...centroidOf([poly]))) tileFor((tx + 0.5) * TILE, (tz + 0.5) * TILE).areas.push({ kind: k, code: 0, polygons: [poly] });
+        }
+      }
+    }
+    sstats[kind]++;
+  }
+  log(`streets (NYC planimetrics): ${sstats.roadbed} roadbed, ${sstats.sidewalk} sidewalk polygons`);
+}
 
 // PLATEAU's LOD1 "buildings" include structures that are not buildings: expressway and railway decks,
 // footbridges, ventilation shafts. Extruded from the ground they become blocks standing in the road.
@@ -217,9 +286,12 @@ log(`roads (PLATEAU): ${rstats.roads} roads, ${rstats.outlines} outlines; detail
 let structures = 0;
 for (const t of tiles.values()) {
   t.buildings = t.buildings.filter((b) => {
-    const anonymous = (b.usage === 454 || b.usage === 461 || !b.usage) && !(b.storeys > 0 && b.storeys < 255);
+    // (New York: the city's survey cuts its sidewalks at the building lines, so anything that stands on the ground
+    // and almost wholly on a sidewalk or a carriageway is a mapping slip — a canopy or an overhang, an outline
+    // misplaced — whatever it is called; what is lifted off the ground over the street stays)
+    const anonymous = area.us ? !(b.lift > 0) : (b.usage === 454 || b.usage === 461 || !b.usage) && !(b.storeys > 0 && b.storeys < 255);
     if (anonymous) {
-      const ring = b.polygons[0][0], [cx, cz] = centroidOf(b.polygons);
+      const [cx, cz] = centroidOf(b.polygons), ring = b.polygons[0][0].map(([x, z]) => [x + (cx - x) * 0.1, z + (cz - z) * 0.1]);
       const inRoad = ring.filter(([x, z]) => idx.road.has(x, z)).length / ring.length;
       if (idx.road.has(cx, cz) && inRoad > 0.7) { structures++; return false; }
     }
@@ -231,7 +303,7 @@ log(`buildings: dropped ${structures} unnamed structures standing in a road`);
 
 // ---------------------------------------------------------------- OSM
 const osm = readOsm(path.join(area.rawDir, 'osm.json'));
-const graph = buildRoadGraph(osm, proj.project, inBounds);
+const graph = buildRoadGraph(osm, proj.project, (x, z) => inBounds(x, z) && !cleared(x, z));
 // road level per node: the ground, or above it on bridges and the elevated expressway
 const { level, spans } = profileRoads(graph.edges, graph.pos, ground);
 const roadsOut = {
@@ -312,7 +384,7 @@ const land = landRaw.areas.map(({ kind, ring, code }) => {
   const r = xz(ring).slice(0, -1); // drop the closing point
   if (areaEN(r) < 0) r.reverse();
   return { kind, ring: r, code: kind === AREA.PITCH ? code : 0 };
-}).filter((a) => a.ring.length >= 3 && Math.abs(areaEN(a.ring)) > 4);
+}).filter((a) => a.ring.length >= 3 && Math.abs(areaEN(a.ring)) > 4 && !cleared(a.ring.reduce((t, p) => t + p[0], 0) / a.ring.length, a.ring.reduce((t, p) => t + p[1], 0) / a.ring.length));
 for (const a of land) if (a.kind === AREA.WATER) idx.water.add([a.ring]);
 idx.park = new PolyIndex(); // (paths in a park get lamps)
 for (const a of land) if (a.kind === AREA.PARK) idx.park.add([a.ring]);
@@ -329,6 +401,7 @@ const pushClipped = (kind, ring, code = 0) => {
     }
 };
 const courtLines = [];
+if (area.twinTowers) { const ring = PLAZA.map(([x, z]) => [r2(x), r2(z)]); if (areaEN(ring) < 0) ring.reverse(); pushClipped(AREA.PLAZA, ring); }
 for (const { kind, ring, code } of land) {
   lstats[kind] = (lstats[kind] ?? 0) + 1;
   pushClipped(kind, ring, code);
@@ -363,7 +436,7 @@ for (const m of paint.marks) {
   const ring = m.ring.map(([x, z]) => [r2(x), r2(z)]);
   if (areaEN(ring) < 0) ring.reverse();
   const cx = ring.reduce((s, p) => s + p[0], 0) / 4, cz = ring.reduce((s, p) => s + p[1], 0) / 4;
-  if (inBounds(cx, cz)) tileFor(cx, cz).areas.push({ kind: m.kind, code: 0, polygons: [[ring]] });
+  if (inBounds(cx, cz) && !cleared(cx, cz)) tileFor(cx, cz).areas.push({ kind: m.kind, code: 0, polygons: [[ring]] });
 }
 // Street-level bridges. Every road polygon touching a bridge's corridor is tied to that deck (the client
 // holds it at deck level between the banks), and the edges of those polygons that face open air over the
@@ -403,13 +476,14 @@ const extras = buildExtras(extraRaw, { idx, ground, inBounds, rails, roadAt });
 const centre = (ring) => [ring.reduce((s, p) => s + p[0], 0) / ring.length, ring.reduce((s, p) => s + p[1], 0) / ring.length];
 const rounded = (ring) => { const r = ring.map(([x, z]) => [r2(x), r2(z)]); if (areaEN(r) < 0) r.reverse(); return r; };
 for (const a of extras.areas) {
+  if (cleared(...centre(a.ring))) continue;
   if (a.clip) { pushClipped(a.kind, a.ring, a.code); continue; }
   const [cx, cz] = centre(a.ring);
   if (inBounds(cx, cz)) tileFor(cx, cz).areas.push({ kind: a.kind, code: a.code, polygons: [[rounded(a.ring)]] });
 }
 for (const m of [...extras.marks, ...courtLines.map((ring) => ({ kind: AREA.MARK_WHITE, ring }))]) {
   const [cx, cz] = centre(m.ring);
-  if (inBounds(cx, cz)) tileFor(cx, cz).areas.push({ kind: m.kind, code: 0, polygons: [[rounded(m.ring)]] });
+  if (inBounds(cx, cz) && !cleared(cx, cz)) tileFor(cx, cz).areas.push({ kind: m.kind, code: 0, polygons: [[rounded(m.ring)]] });
 }
 // a footbridge PLATEAU has as a model is not built a second time from the OSM line
 const osmBridges = extras.structures.footbridges.length;
@@ -420,11 +494,11 @@ fs.mkdirSync(area.outDir, { recursive: true });
 log(`OSM extras: ${Object.entries(extras.count).map(([k, v]) => `${k} ${v}`).join(', ')}`);
 
 const placed = placeProps({
-  land, trees: landRaw.trees.map(([lon, lat, g]) => [...proj.project(lon, lat), g]), treeRows: landRaw.treeRows.map((row) => Object.assign(xz(row), { genus: row.genus })), vending: xz(landRaw.vending),
-  edges: roadsOut.edges, idx, inBounds,
+  land, trees: landRaw.trees.map(([lon, lat, g]) => [...proj.project(lon, lat), g]), treeRows: landRaw.treeRows.map((row) => Object.assign(xz(row), { genus: row.genus })), vending: area.us ? [] : xz(landRaw.vending),
+  edges: roadsOut.edges, idx, inBounds, poles: !area.us,
 });
 const allProps = [...placed.props, ...paint.props, ...extras.props];
-for (const p of allProps) tileFor(p.x, p.z).props.push({ ...p, x: r2(p.x), z: r2(p.z) });
+for (const p of allProps) if (!cleared(p.x, p.z, 4)) tileFor(p.x, p.z).props.push({ ...p, x: r2(p.x), z: r2(p.z) });
 for (const w of placed.wires) tileFor(w[0], w[1]).wires.push(w.map(r2));
 const propName = Object.fromEntries(Object.entries(PROP).map(([k, v]) => [v, k.toLowerCase()]));
 const pcount = {};
@@ -467,16 +541,16 @@ const places = readPlaces(path.join(area.rawDir, 'osm_poi.json'), proj.project);
 const signBuildings = [...tiles.values()].flatMap((t) => t.buildings.map((b) => ({ ring: b.polygons[0][0], base: b.base, height: b.height, usage: b.usage, storeys: b.storeys < 255 ? b.storeys : 0 })));
 const signs = placeSigns(places, signBuildings, (x, z) => idx.road.has(x, z));
 // Billboards, screens and banners are invented, not mapped data: --no-ads leaves them out.
-const ads = process.argv.includes('--no-ads') ? [] : placeAds(signBuildings); // (the origin is the Scramble Crossing)
+const ads = process.argv.includes('--no-ads') ? [] : area.adSquare ? placeAdsNyc(signBuildings, area.adSquare) : placeAds(signBuildings); // (Tokyo: the origin is the Scramble Crossing)
 signs.push(...ads);
 log(`ads: ${ads.filter((s) => s.style === 3).length} billboards, ${ads.filter((s) => s.style === 4).length} screens, ${ads.filter((s) => s.style === 5).length} rooftop boards, ${ads.filter((s) => s.style === 6).length} banners`);
-for (const s of signs) if (inBounds(s.x, s.z)) tileFor(s.x, s.z).signs.push({ ...s, x: r2(s.x), y: r2(s.y), z: r2(s.z), w: r2(s.w), h: r2(s.h) });
+for (const s of signs) if (inBounds(s.x, s.z) && !cleared(s.x, s.z, -6)) tileFor(s.x, s.z).signs.push({ ...s, x: r2(s.x), y: r2(s.y), z: r2(s.z), w: r2(s.w), h: r2(s.h) });
 log(`signs: ${signs.length} from ${places.length} named places (fascia ${signs.filter((s) => s.style === 0).length}, blade ${signs.filter((s) => s.style === 1).length}, building names ${signs.filter((s) => s.style === 2).length})`);
 
 // ---------------------------------------------------------------- street furniture
 const furniture = placeFurniture(path.join(area.rawDir, 'osm_poi.json'), proj.project, idx, ground, inBounds);
-for (const p of furniture.props) tileFor(p.x, p.z).props.push({ ...p, x: r2(p.x), z: r2(p.z) });
-for (const s of furniture.signs) tileFor(s.x, s.z).signs.push({ ...s, x: r2(s.x), y: r2(s.y), z: r2(s.z), w: r2(s.w), h: r2(s.h) });
+for (const p of furniture.props) if (!cleared(p.x, p.z, 4)) tileFor(p.x, p.z).props.push({ ...p, x: r2(p.x), z: r2(p.z) });
+for (const s of furniture.signs) if (!cleared(s.x, s.z, -6)) tileFor(s.x, s.z).signs.push({ ...s, x: r2(s.x), y: r2(s.y), z: r2(s.z), w: r2(s.w), h: r2(s.h) });
 log(`street furniture (OSM): ${Object.entries(furniture.count).map(([k, v]) => `${propName[k]} ${v}`).join(', ')}`);
 
 // ---------------------------------------------------------------- PLATEAU models against generated objects
@@ -546,7 +620,7 @@ fs.writeFileSync(path.join(area.outDir, 'structures.json'), JSON.stringify(extra
 let backdrop = null;
 if (area.backdropBbox) {
   const b = area.backdropBbox, [bx0, bz1] = proj.project(b.west, b.south), [bx1, bz0] = proj.project(b.east, b.north);
-  const g = buildBackdropGrid(path.join(area.rawDir, 'dem'), proj, { minX: bx0, maxX: bx1, minZ: bz0, maxZ: bz1 }, BACKDROP.step, BACKDROP.zoom);
+  const g = buildBackdropGrid(path.join(area.rawDir, 'dem'), proj, { minX: bx0, maxX: bx1, minZ: bz0, maxZ: bz1 }, BACKDROP.step, BACKDROP.zoom, !!area.us);
   fs.writeFileSync(path.join(area.outDir, 'backdrop.bin'), Buffer.from(g.data.buffer));
   let top = 0;
   for (const v of g.data) top = Math.max(top, v);
@@ -555,7 +629,7 @@ if (area.backdropBbox) {
 }
 const manifest = {
   format: VERSION, area: area.id, name: area.name, compiled: new Date().toISOString(),
-  origin: { lon: area.origin[0], lat: area.origin[1] },
+  origin: { lon: area.origin[0], lat: area.origin[1] }, tz: area.tz ?? 'Asia/Tokyo',
   frame: 'metres; x east, y up (TP height), z south',
   tileSize: TILE, bounds: Object.fromEntries(Object.entries(bounds).map(([k, v]) => [k, r2(v)])),
   meshes: area.meshes,
@@ -563,10 +637,16 @@ const manifest = {
   roads: 'roads.json', rails: 'rails.json', structures: 'structures.json',
   ...(backdrop ? { backdrop } : {}),
   ...(area.view ? { view: area.view } : {}),
+  ...(area.walk ? { walk: area.walk } : {}),
   // street-level bridge decks: road polygons marked with a deck, and street objects, follow these instead of the terrain (src/shared/decks.js)
   decks,
   tiles: tileList,
-  attribution: [
+  attribution: area.us ? [
+    'Building footprints and heights, roadbed and sidewalks, orthophotos: NYC Open Data / NYC OTI',
+    'Buildings, building parts, road network and railways: © OpenStreetMap contributors (ODbL 1.0)',
+    'Elevation: USGS 3DEP via the Terrarium tiles of the AWS open elevation dataset',
+    'Surroundings imagery: Esri World Imagery (Esri, Maxar, Earthstar Geographics)',
+  ] : [
     '3D city model, roof photos, bridges, street furniture: Project PLATEAU, MLIT Japan (CC BY 4.0 compatible PLATEAU terms)',
     'Elevation: Geospatial Information Authority of Japan (GSI) DEM tiles',
     'Road network and railways: © OpenStreetMap contributors (ODbL 1.0)',
